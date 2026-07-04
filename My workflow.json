@@ -1,0 +1,1392 @@
+{
+  "name": "My workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "has:attachment is:unread newer_than:1d"
+        },
+        "options": {
+          "downloadAttachments": true
+        }
+      },
+      "id": "0e45f583-3acd-4321-a1cf-b4821a8d68f8",
+      "name": "Watch Recruitment Inbox",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -832,
+        560
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "n5WLRLL5Y3RTl4Fd",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "sender_name",
+              "type": "string",
+              "value": "={{$json.from?.value?.[0]?.name || $json.From || ''}}"
+            },
+            {
+              "id": "a2",
+              "name": "sender_email",
+              "type": "string",
+              "value": "={{$json.from?.value?.[0]?.address || $json.From || ''}}"
+            },
+            {
+              "id": "a3",
+              "name": "email_subject",
+              "type": "string",
+              "value": "={{$json.subject || $json.Subject || ''}}"
+            },
+            {
+              "id": "a4",
+              "name": "received_at",
+              "type": "string",
+              "value": "={{ $json.internalDate ? new Date(Number($json.internalDate)).toISOString() : ($json.date ? new Date($json.date).toISOString() : ($json.headers?.date ? new Date($json.headers.date).toISOString() : $now.toISO())) }}"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "9afec4e3-0631-423e-92b9-7b3fa5d66637",
+      "name": "Capture Email Metadata",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -624,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "output": "={{ $binary.attachment_0.mimeType.includes('pdf') ? 0 : ($binary.attachment_0.mimeType.includes('word') || $binary.attachment_0.fileExtension === 'docx') ? 1 : 2 }}"
+      },
+      "id": "96628275-c018-4e82-a82e-708549dce5b3",
+      "name": "Route by File Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -464,
+        1040
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract text from DOCX with ZERO require() calls (no built-ins, no external packages)\n// Implements raw DEFLATE (RFC 1951) inflate in pure JS, since even Node's built-in\n// 'zlib' module is disallowed by this n8n instance's Code node sandbox.\n\nfunction inflateRaw(data) {\n  let pos = 0; // bit position\n\n  function readBit() {\n    const byteIndex = pos >>> 3;\n    const bitIndex = pos & 7;\n    const bit = (data[byteIndex] >> bitIndex) & 1;\n    pos++;\n    return bit;\n  }\n\n  function readBits(n) {\n    let value = 0;\n    for (let i = 0; i < n; i++) {\n      value |= readBit() << i;\n    }\n    return value >>> 0;\n  }\n\n  function alignToByte() {\n    pos = (pos + 7) & ~7;\n  }\n\n  function buildHuffman(lengths) {\n    let maxBits = 0;\n    for (const l of lengths) if (l > maxBits) maxBits = l;\n    const blCount = new Array(maxBits + 1).fill(0);\n    for (const l of lengths) if (l > 0) blCount[l]++;\n    const nextCode = new Array(maxBits + 1).fill(0);\n    let code = 0;\n    blCount[0] = 0;\n    for (let bits = 1; bits <= maxBits; bits++) {\n      code = (code + blCount[bits - 1]) << 1;\n      nextCode[bits] = code;\n    }\n    const map = Object.create(null);\n    for (let n = 0; n < lengths.length; n++) {\n      const len = lengths[n];\n      if (len > 0) {\n        const c = nextCode[len];\n        nextCode[len]++;\n        map[len + '_' + c] = n;\n      }\n    }\n    return { map, maxBits };\n  }\n\n  function decodeSymbol(huff) {\n    let code = 0;\n    for (let len = 1; len <= huff.maxBits; len++) {\n      code = (code << 1) | readBit();\n      const key = len + '_' + code;\n      if (key in huff.map) return huff.map[key];\n    }\n    throw new Error('Invalid Huffman code in DOCX stream');\n  }\n\n  const lengthBase = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];\n  const lengthExtra = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];\n  const distBase = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];\n  const distExtra = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];\n  const clOrder = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];\n\n  const output = [];\n  let final = 0;\n\n  do {\n    final = readBit();\n    const type = readBits(2);\n\n    if (type === 0) {\n      alignToByte();\n      const byteIndex = pos >>> 3;\n      const len = data[byteIndex] | (data[byteIndex + 1] << 8);\n      pos += 32;\n      const start = pos >>> 3;\n      for (let i = 0; i < len; i++) output.push(data[start + i]);\n      pos += len * 8;\n    } else if (type === 1 || type === 2) {\n      let litHuff, distHuff;\n      if (type === 1) {\n        const litLengths = new Array(288);\n        for (let i = 0; i <= 143; i++) litLengths[i] = 8;\n        for (let i = 144; i <= 255; i++) litLengths[i] = 9;\n        for (let i = 256; i <= 279; i++) litLengths[i] = 7;\n        for (let i = 280; i <= 287; i++) litLengths[i] = 8;\n        litHuff = buildHuffman(litLengths);\n        distHuff = buildHuffman(new Array(30).fill(5));\n      } else {\n        const hlit = readBits(5) + 257;\n        const hdist = readBits(5) + 1;\n        const hclen = readBits(4) + 4;\n        const clLengths = new Array(19).fill(0);\n        for (let i = 0; i < hclen; i++) clLengths[clOrder[i]] = readBits(3);\n        const clHuff = buildHuffman(clLengths);\n\n        const lengths = [];\n        while (lengths.length < hlit + hdist) {\n          const sym = decodeSymbol(clHuff);\n          if (sym < 16) {\n            lengths.push(sym);\n          } else if (sym === 16) {\n            const repeat = readBits(2) + 3;\n            const prev = lengths[lengths.length - 1];\n            for (let i = 0; i < repeat; i++) lengths.push(prev);\n          } else if (sym === 17) {\n            const repeat = readBits(3) + 3;\n            for (let i = 0; i < repeat; i++) lengths.push(0);\n          } else {\n            const repeat = readBits(7) + 11;\n            for (let i = 0; i < repeat; i++) lengths.push(0);\n          }\n        }\n        litHuff = buildHuffman(lengths.slice(0, hlit));\n        distHuff = buildHuffman(lengths.slice(hlit, hlit + hdist));\n      }\n\n      while (true) {\n        const sym = decodeSymbol(litHuff);\n        if (sym < 256) {\n          output.push(sym);\n        } else if (sym === 256) {\n          break;\n        } else {\n          const li = sym - 257;\n          const length = lengthBase[li] + readBits(lengthExtra[li]);\n          const distSym = decodeSymbol(distHuff);\n          const distance = distBase[distSym] + readBits(distExtra[distSym]);\n          const startPos = output.length - distance;\n          for (let i = 0; i < length; i++) output.push(output[startPos + i]);\n        }\n      }\n    } else {\n      throw new Error('Invalid DEFLATE block type in DOCX stream');\n    }\n  } while (!final);\n\n  return output;\n}\n\nfunction extractDocxText(buffer) {\n  const files = {};\n  let offset = 0;\n  const LOCAL_FILE_HEADER_SIG = 0x04034b50;\n\n  while (offset < buffer.length - 4) {\n    const sig = buffer.readUInt32LE(offset);\n    if (sig !== LOCAL_FILE_HEADER_SIG) break;\n\n    const compressionMethod = buffer.readUInt16LE(offset + 8);\n    const compressedSize = buffer.readUInt32LE(offset + 18);\n    const fileNameLength = buffer.readUInt16LE(offset + 26);\n    const extraFieldLength = buffer.readUInt16LE(offset + 28);\n\n    const fileNameStart = offset + 30;\n    const fileName = buffer.toString('utf8', fileNameStart, fileNameStart + fileNameLength);\n\n    const dataStart = fileNameStart + fileNameLength + extraFieldLength;\n    const dataEnd = dataStart + compressedSize;\n    const compressedData = buffer.slice(dataStart, dataEnd);\n\n    let content;\n    if (compressionMethod === 0) {\n      content = compressedData;\n    } else if (compressionMethod === 8) {\n      try {\n        content = Buffer.from(inflateRaw(compressedData));\n      } catch (e) {\n        content = Buffer.alloc(0);\n      }\n    } else {\n      content = Buffer.alloc(0);\n    }\n\n    files[fileName] = content;\n    offset = dataEnd;\n  }\n\n  const docXml = files['word/document.xml'];\n  if (!docXml) return '';\n\n  const xml = docXml.toString('utf8');\n  let result = '';\n  const regex = /<w:p\\b[^>]*>|<\\/w:p>|<w:tab\\/>|<w:br\\/>|<w:t[^>]*>([^<]*)<\\/w:t>/g;\n  let m;\n  while ((m = regex.exec(xml)) !== null) {\n    const full = m[0];\n    if (full.startsWith('<w:p')) {\n      result += '\\n';\n    } else if (full === '<w:tab/>') {\n      result += '\\t';\n    } else if (full === '<w:br/>') {\n      result += '\\n';\n    } else if (m[1] !== undefined) {\n      result += m[1]\n        .replace(/&amp;/g, '&')\n        .replace(/&lt;/g, '<')\n        .replace(/&gt;/g, '>')\n        .replace(/&quot;/g, '\"')\n        .replace(/&apos;/g, \"'\");\n    }\n  }\n\n  return result.replace(/\\n{2,}/g, '\\n\\n').trim();\n}\n\nconst results = [];\nfor (const item of $input.all()) {\n  const binaryKey = Object.keys(item.binary || {})[0];\n  if (!binaryKey) continue;\n  const buffer = await this.helpers.getBinaryDataBuffer(items.indexOf(item), binaryKey);\n  const text = extractDocxText(buffer);\n\n  results.push({\n    json: {\n      ...item.json,\n      resume_text: text,\n      file_type: 'docx',\n      file_name: item.binary[binaryKey].fileName || 'resume.docx'\n    },\n    binary: item.binary\n  });\n}\nreturn results;"
+      },
+      "id": "39c4f2a9-9b15-4b61-83d9-7bb0d9451ede",
+      "name": "Extract Text (DOCX)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -224,
+        960
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "35549045-70d8-47b4-9d26-a25eb338e7a2",
+      "name": "Ignore Unsupported Attachment",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -144,
+        1088
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "cc79b799-4f89-4929-a435-7699f86a5fc0",
+      "name": "Merge Extracted Text",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        128,
+        960
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'llama-3.1-8b-instant',\n  temperature: 0,\n  response_format: {\n    type: \"json_object\"\n  },\n  messages: [\n    {\n      role: \"system\",\n      content: `You are an expert technical recruiter and resume parser.\n\nExtract structured candidate information from the resume text.\n\nReturn ONLY valid JSON matching EXACTLY this schema:\n\n{\n  \"candidate_name\": string,\n  \"email\": string,\n  \"phone\": string,\n  \"location\": string,\n  \"total_experience_years\": number,\n  \"current_role\": string,\n  \"current_company\": string,\n  \"education\": [string],\n  \"technical_skills\": [string],\n  \"soft_skills\": [string],\n  \"certifications\": [string],\n  \"languages\": [string],\n  \"projects\": [string],\n  \"linkedin_profile\": string\n}\n\nRules:\n- DO NOT rename any keys.\n- DO NOT use alternative keys like name, skills, experience_years, or work_experience.\n- Use null for missing string or number fields.\n- Use [] for missing arrays.\n- Never fabricate information that is not present in the resume.\n- For current_role and current_company, extract the latest role and employer from work experience.\n- total_experience_years must be a number only.\n- technical_skills must contain only technical skills.\n- Return pure JSON only. No markdown and no explanations.`\n    },\n    {\n      role: \"user\",\n      content: $json.text\n    }\n  ]\n}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "cb776146-f632-444c-bcc8-1a4bc75f1bc0",
+      "name": "AI: Parse Resume (Groq)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        528,
+        768
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "Aoijtk1z5mJLjsgO",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function safeJsonParse(str) {\n  try {\n    return JSON.parse(str);\n  } catch (e) {\n    const match = String(str).match(/\\{[\\s\\S]*\\}/);\n    if (match) {\n      try {\n        return JSON.parse(match[0]);\n      } catch {\n        return null;\n      }\n    }\n    return null;\n  }\n}\n\nfunction validEmail(email) {\n  return typeof email === 'string' &&\n    /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email);\n}\n\nfunction normalizePhone(phone) {\n  if (!phone) return null;\n  const digits = String(phone).replace(/[^\\d+]/g, '');\n  return digits.length >= 10 ? digits : null;\n}\n\nfunction dedupe(arr) {\n  if (!Array.isArray(arr)) return [];\n  return [...new Set(arr.map(v => String(v).trim()).filter(Boolean))];\n}\n\nconst out = [];\n\nfor (const item of $input.all()) {\n  let raw =\n    item.json.choices?.[0]?.message?.content ||\n    item.json.data ||\n    '{}';\n\n  raw = String(raw)\n    .replace(/```json/g, '')\n    .replace(/```/g, '')\n    .trim();\n\n  const parsed = safeJsonParse(raw) || {};\n  const sourceText = item.json.text || '';\n\n  const fallbackName =\n    sourceText.match(/^[A-Z][A-Za-z\\s]+/m)?.[0]?.trim();\n\n  const fallbackEmail =\n    sourceText.match(\n      /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/\n    )?.[0];\n\n  const fallbackPhone =\n    sourceText.match(\n      /(\\+91[\\s-]?)?[6-9]\\d{9}/\n    )?.[0];\n\n  const cleaned = {\n    candidate_name:\n      parsed.candidate_name ||\n      parsed.name ||\n      fallbackName ||\n      'Unknown Candidate',\n\n    email:\n      validEmail(parsed.email)\n        ? parsed.email\n        : (fallbackEmail || null),\n\n    phone:\n      normalizePhone(parsed.phone) ||\n      fallbackPhone ||\n      null,\n\n    location:\n      parsed.location || null,\n\n    total_experience_years:\n      parseFloat(\n        parsed.total_experience_years ??\n        parsed.experience_years\n      ) || 0,\n\n    current_role:\n      parsed.current_role ||\n      parsed.work_experience?.[0]?.position ||\n      null,\n\n    current_company:\n      parsed.current_company ||\n      parsed.work_experience?.[0]?.company ||\n      null,\n\n    education: dedupe(\n      Array.isArray(parsed.education)\n        ? parsed.education.map(e =>\n            typeof e === 'object'\n              ? `${e.degree || ''} ${e.field || ''}`.trim()\n              : e\n          )\n        : []\n    ),\n\n    technical_skills: dedupe(\n      parsed.technical_skills ||\n      parsed.skills ||\n      []\n    ),\n\n    soft_skills: dedupe(parsed.soft_skills),\n    certifications: dedupe(parsed.certifications),\n    languages: dedupe(parsed.languages),\n    projects: dedupe(parsed.projects),\n\n    linkedin_profile:\n      parsed.linkedin_profile ||\n      parsed.linkedin ||\n      null,\n\n    parse_error: false\n  };\n\n  out.push({\n    json: {\n      ...item.json,\n      resume_data: cleaned\n    }\n  });\n}\n\nreturn out;"
+      },
+      "id": "ba488f4f-b58b-460e-a248-a9dfb9d13e98",
+      "name": "Validate & Clean Parsed JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        192,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'llama-3.1-8b-instant',\n  temperature: 0,\n  response_format: { type: 'json_object' },\n  messages: [\n    { role: 'system', content: `You are an expert technical recruiter evaluating candidate fit against a job description. Compare the candidate's structured resume data against the job description provided. Return ONLY valid JSON, no markdown, no commentary, matching exactly this schema:\n{\n  \"match_score\": number (0-100),\n  \"matching_skills\": [string],\n  \"missing_skills\": [string],\n  \"relevant_experience\": string,\n  \"potential_concerns\": [string],\n  \"ai_summary\": string (2-4 sentences),\n  \"hiring_recommendation\": \"Strong Fit\" | \"Possible Fit\" | \"Not a Fit\"\n}\nBase the score on skills overlap, years of relevant experience, education fit, and role seniority. Be objective and evidence-based; do not penalize for demographic factors, gaps unrelated to skill, or formatting. Only cite concerns that are directly supported by the resume data. STRICT DOMAIN CHECK: if the candidate\\u2019s technical_skills show fundamentally no overlap with the job\\u2019s core required stack (e.g., the candidate is from an entirely unrelated engineering discipline such as mechanical, civil, or electrical design with no Python/AI/backend experience, while the JD requires Python, LLMs, RAG, or similar), you MUST cap match_score at 20 or below and set hiring_recommendation to \\\"Not a Fit\\\", regardless of soft skills, years of experience, or general engineering competence. Do not award points for adjacent-sounding but unrelated tools (e.g., AutoCAD, SolidWorks, Excel) as if they satisfy technical requirements.` },\n    { role: 'user', content: 'JOB DESCRIPTION:\\n' + $('Set Job Description').first().json.job_description + '\\n\\nCANDIDATE RESUME DATA (JSON):\\n' + JSON.stringify($json.resume_data) }\n  ]\n}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "b054a1ad-5410-427e-b3d7-0ba4bcc26212",
+      "name": "AI: Match vs Job Description (Groq)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "Aoijtk1z5mJLjsgO",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// ---- Multiple Job Descriptions (Priority 2) ----\n// Add / edit job openings here. The workflow auto-selects the best match\n// based on keywords found in the email subject line. If nothing matches,\n// it falls back to the first (default) job description below.\n\nconst jobDescriptions = [\n  {\n    title: \"Python Developer\",\n    keywords: [\"python developer\", \"python dev\", \"backend developer\", \"python engineer\", \"backend python\"],\n    description: `Job Title\n\nPython Developer\n\nExperience\n\n1-3 Years\n\nLocation\n\nHyderabad, Bangalore, Remote\n\nEmployment Type\n\nFull-Time\n\nAbout the Role\n\nWe are looking for a skilled Python Developer to design, build, and maintain backend\napplications and APIs. The ideal candidate writes clean, efficient Python code, works\ncomfortably with relational databases, and understands the fundamentals of building\nand deploying production software.\n\nKey Responsibilities\nDesign and develop backend services and REST APIs using Python.\nWrite clean, maintainable, well-tested code following object-oriented principles.\nWork with relational databases (PostgreSQL/MySQL) to design schemas and write queries.\nDebug, test, and optimize existing applications for performance and reliability.\nUse Git for version control and collaborate with a team using standard branching workflows.\nContainerize and deploy applications using Docker.\nWrite unit and integration tests to ensure code quality.\nCollaborate with cross-functional teams to translate requirements into working software.\n\nRequired Skills\nProgramming\nPython\nObject-Oriented Programming\nREST APIs\nSQL\n\nFrameworks & Tools\nDjango or Flask\nGit\nGitHub\nDocker\nPytest or Unittest\n\nDatabases\nPostgreSQL\nMySQL\n\nPreferred Qualifications\nExperience building and deploying production backend services.\nFamiliarity with CI/CD pipelines.\nBasic understanding of cloud platforms (AWS/GCP/Azure).\nStrong debugging and problem-solving skills.\nGood communication and ability to work in a team environment.\n\nIdeal Candidate Profile\n\n- 1-3 years of hands-on Python development experience\n- Built and shipped REST APIs using Django or Flask\n- Comfortable writing SQL queries and designing database schemas\n- Experience with Git-based version control workflows\n- Familiar with Docker for containerized deployment\n- Writes and maintains automated tests\n- Strong fundamentals in data structures and OOP`\n  },\n  {\n    title: \"Data Analyst\",\n    keywords: [\"data analyst\", \"data analytics\", \"business analyst\", \"reporting analyst\"],\n    description: `Job Title\n\nData Analyst\n\nExperience\n\n1-3 Years\n\nLocation\n\nRemote / Hybrid\n\nEmployment Type\n\nFull-Time\n\nAbout the Role\n\nWe are looking for a Data Analyst who can turn raw data into actionable insights,\nbuild dashboards, and support data-driven decision making across teams.\n\nRequired Skills\nSQL, Excel, Python (pandas), data visualization (Power BI / Tableau),\nstatistics fundamentals, strong communication skills.\n\nPreferred Qualifications\nExperience with A/B testing, ETL pipelines, and business intelligence tools.`\n  },\n  {\n    title: \"Frontend Developer\",\n    keywords: [\"frontend developer\", \"front-end developer\", \"react developer\", \"ui developer\", \"javascript developer\"],\n    description: `Job Title\n\nFrontend Developer\n\nExperience\n\n1-3 Years\n\nLocation\n\nRemote / Hybrid\n\nEmployment Type\n\nFull-Time\n\nAbout the Role\n\nWe are looking for a Frontend Developer skilled in building responsive,\naccessible, and performant user interfaces.\n\nRequired Skills\nJavaScript/TypeScript, React, HTML5, CSS3, REST API integration,\nGit, responsive design, testing (Jest/RTL).\n\nPreferred Qualifications\nExperience with Next.js, state management (Redux/Zustand), and CI/CD pipelines.`\n  }\n];\n\n// Try to detect the target role from the email subject first, then fall back\n// to scanning the subject/sender fields for any additional signal.\nconst subject = String($json.email_subject || $json.subject || $json.Subject || '').toLowerCase();\n\nlet selected = jobDescriptions.find(jd =>\n  jd.keywords.some(kw => subject.includes(kw))\n);\n\nlet matchedBy = 'keyword-match';\nif (!selected) {\n  selected = jobDescriptions[0]; // default JD when no keyword is found in the subject\n  matchedBy = 'default-fallback';\n}\n\nreturn [{\n  json: {\n    ...$json,\n    job_title: selected.title,\n    job_description: selected.description,\n    job_description_matched_by: matchedBy,\n    available_job_titles: jobDescriptions.map(j => j.title)\n  }\n}];\n"
+      },
+      "id": "351d5a05-651e-4d66-8473-3781ee865740",
+      "name": "Set Job Description",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -832,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function safeJsonParse(str) {\n  try {\n    return JSON.parse(str);\n  } catch (e) {\n    const match = String(str).match(/\\{[\\s\\S]*\\}/);\n    if (match) {\n      try {\n        return JSON.parse(match[0]);\n      } catch (e2) {\n        return null;\n      }\n    }\n    return null;\n  }\n}\n\nconst out = [];\n\nfor (const item of $input.all()) {\n  // Resume data from Validate & Clean Parsed JSON\n  const resume = item.json.resume_data || {};\n\n  // JD Match response from Groq\n  const raw =\n    item.json.choices?.[0]?.message?.content || '{}';\n\n  const match = safeJsonParse(raw) || {\n    match_score: 0,\n    matching_skills: [],\n    missing_skills: [],\n    relevant_experience: '',\n    potential_concerns: [\n      'AI matching failed - needs manual review'\n    ],\n    ai_summary: 'Automated matching failed.',\n    hiring_recommendation: 'Possible Fit'\n  };\n\n  // --- Deterministic scoring engine ---\n  // The AI's own numeric score has proven inconsistent across tests, so the\n  // score and status below are computed with fixed rules from the candidate's\n  // parsed skill list, NOT from the AI's match_score. The AI's text output\n  // (ai_summary, matching_skills, missing_skills, potential_concerns) is\n  // still used for narrative context, but the number and status are now\n  // fully reproducible.\n  //\n  // EDIT THIS if the job description changes: each category should reflect\n  // a \"must-have\" area from the JD, weights should sum to 100.\n  const scoringCategories = [\n    { label: 'Python',        keywords: ['python'],                    weight: 25 },\n    { label: 'Framework',     keywords: ['django', 'flask'],           weight: 25 },\n    { label: 'Database',      keywords: ['sql', 'postgresql', 'mysql'],weight: 15 },\n    { label: 'Testing',       keywords: ['pytest', 'unittest'],        weight: 15 },\n    { label: 'Version Control', keywords: ['git', 'github'],           weight: 10 },\n    { label: 'Docker',        keywords: ['docker'],                    weight: 10 }\n  ];\n\n  const candidateSkillsText = (Array.isArray(resume.technical_skills)\n    ? resume.technical_skills.join(' ')\n    : String(resume.technical_skills || '')\n  ).toLowerCase();\n\n  let score = 0;\n  const categoryHits = [];\n  for (const cat of scoringCategories) {\n    const hit = cat.keywords.some(kw => candidateSkillsText.includes(kw));\n    if (hit) score += cat.weight;\n    categoryHits.push(`${cat.label}: ${hit ? 'matched' : 'missing'}`);\n  }\n  score = Math.max(0, Math.min(100, score));\n\n  // Recompute the recommendation label to match the deterministic score,\n  // so \"Recommendation\" and \"Application Status\" can never contradict\n  // each other again.\n  if (score >= 80) {\n    match.hiring_recommendation = 'Strong Fit';\n  } else if (score >= 60) {\n    match.hiring_recommendation = 'Possible Fit';\n  } else {\n    match.hiring_recommendation = 'Not a Fit';\n  }\n\n  let status;\n  if (score >= 80) {\n    status = 'Shortlisted';\n  } else if (score >= 60) {\n    status = 'Manual Review';\n  } else {\n    status = 'Rejected';\n  }\n\n  out.push({\n    json: {\n      // Resume Details\n      name: resume.candidate_name || '',\n      email: resume.email || '',\n      phone: resume.phone || '',\n      location: resume.location || '',\n      experience_years:\n        Number(resume.total_experience_years) || 0,\n      skills: resume.technical_skills || [],\n      education: resume.education || [],\n      work_experience:\n        resume.work_experience || [],\n\n      // Email Metadata\n      sender_name: item.json.sender_name || '',\n      sender_email: item.json.sender_email || '',\n      email_subject: item.json.email_subject || '',\n      received_at: item.json.received_at || '',\n      file_name: item.json.file_name || '',\n      resume_file_url: item.json.resume_file_url || '',\n      job_title: item.json.job_title || '',\n\n      // Matching Results\n      match_score: score,\n      matching_skills:\n        match.matching_skills || [],\n      missing_skills:\n        match.missing_skills || [],\n      relevant_experience:\n        match.relevant_experience || '',\n      potential_concerns: [\n        ...(match.potential_concerns || []),\n        `Deterministic scoring breakdown: ${categoryHits.join(', ')}`\n      ],\n      ai_summary:\n        match.ai_summary || '',\n      hiring_recommendation:\n        match.hiring_recommendation ||\n        'Possible Fit',\n      application_status: status\n    },\n    binary: item.binary\n  });\n}\n\nreturn out;"
+      },
+      "id": "46ae204e-fa53-4e40-8137-e9c9ff6df976",
+      "name": "Build Final Candidate Record",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        864,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "base": {
+          "__rl": true,
+          "value": "appLwkSFYYaeAYPYx",
+          "mode": "list",
+          "cachedResultName": "Recruitment",
+          "cachedResultUrl": "https://airtable.com/appLwkSFYYaeAYPYx"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblhyP0jhF2Tndoey",
+          "mode": "list",
+          "cachedResultName": "Candidates",
+          "cachedResultUrl": "https://airtable.com/appLwkSFYYaeAYPYx/tblhyP0jhF2Tndoey"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Email": "={{$json.email}}",
+            "Phone": "={{$json.phone}}",
+            "Location": "={{$json.location}}",
+            "Experience": "={{$json.experience_years}}",
+            "Education": "={{$json.education.join(', ')}}",
+            "Technical Skills": "={{$json.skills.join(', ')}}",
+            "Match Score": "={{$json.match_score}}",
+            "Matching Skills": "={{$json.matching_skills.join(', ')}}",
+            "Missing Skills": "={{$json.missing_skills.join(', ')}}",
+            "AI Summary": "={{$json.ai_summary}}",
+            "Recommendation": "={{$json.hiring_recommendation}}",
+            "Application Status": "={{$json.application_status}}",
+            "Email Subject": "={{$json.email_subject}}",
+            "Sender Email": "={{$json.email}}",
+            "Received At": "={{$json.received_at || $now.toISO()}}",
+            "Candidate Name": "={{$json.name}}",
+            "Resume Attachment": "={{ $json.resume_file_url ? [{ url: $json.resume_file_url, filename: $json.file_name || 'resume' }] : [] }}",
+            "Job Title Applied For": "={{$json.job_title}}",
+            "Relevant Experience": "={{$json.relevant_experience}}",
+            "Interview Questions": "={{ ($json.interview_questions || []).join('\\n') }}"
+          },
+          "matchingColumns": [
+            "Email"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true,
+              "removed": false
+            },
+            {
+              "id": "Candidate Name",
+              "displayName": "Candidate Name",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Phone",
+              "displayName": "Phone",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Location",
+              "displayName": "Location",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Experience",
+              "displayName": "Experience",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Education",
+              "displayName": "Education",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Technical Skills",
+              "displayName": "Technical Skills",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Match Score",
+              "displayName": "Match Score",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Matching Skills",
+              "displayName": "Matching Skills",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Missing Skills",
+              "displayName": "Missing Skills",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "AI Summary",
+              "displayName": "AI Summary",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Recommendation",
+              "displayName": "Recommendation",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Strong Fit",
+                  "value": "Strong Fit"
+                },
+                {
+                  "name": "Possible Fit",
+                  "value": "Possible Fit"
+                },
+                {
+                  "name": "Not a Fit",
+                  "value": "Not a Fit"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Application Status",
+              "displayName": "Application Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "New",
+                  "value": "New"
+                },
+                {
+                  "name": "Manual Review",
+                  "value": "Manual Review"
+                },
+                {
+                  "name": "Shortlisted",
+                  "value": "Shortlisted"
+                },
+                {
+                  "name": "Interview Scheduled",
+                  "value": "Interview Scheduled"
+                },
+                {
+                  "name": "Rejected",
+                  "value": "Rejected"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Email Subject",
+              "displayName": "Email Subject",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Sender Email",
+              "displayName": "Sender Email",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Received At",
+              "displayName": "Received At",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Relevant Experience",
+              "displayName": "Relevant Experience",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Resume Attachment",
+              "displayName": "Resume Attachment",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "array",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Job Title Applied For",
+              "displayName": "Job Title Applied For",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Interview Questions",
+              "displayName": "Interview Questions",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "8636ed92-ddef-4721-b177-b8b75326fba1",
+      "name": "Create Candidate in Airtable",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        912,
+        480
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "ce35YfWalHdYvcny",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.fields[\"Application Status\"]}}",
+                    "rightValue": "Shortlisted",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "39bc0349-e5aa-4863-a13d-86eb02ae0637"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "74572fd8-64a5-4023-91a1-583afb895bfb",
+                    "leftValue": "={{$json.fields[\"Application Status\"]}}",
+                    "rightValue": "Manual Review",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "d8295465-e085-4cbd-9d4e-57dde6eda2e5",
+                    "leftValue": "={{$json.fields[\"Application Status\"]}}",
+                    "rightValue": "Rejected",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "cc226bf7-f5b9-410a-9a64-3ea81d0b38a8",
+      "name": "Route by Application Status",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        1120,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{$json.fields['Email']}}",
+        "subject": "=Interview Invitation - {{$json.fields['Candidate Name']}}",
+        "message": "=Hi {{$json.fields['Candidate Name']}},\n\n<br><br>\n\nThank you for applying for the {{$json.fields['Job Title Applied For'] || 'role'}} position. We were impressed with your profile and would like to invite you for an interview.\n\n<br><br>\n\nTo help you prepare, here are a few areas we'll likely explore during the conversation:\n<br>\n{{ ($json.interview_questions || []).map((q, i) => (i + 1) + '. ' + q).join('<br>') }}\n\n<br><br>\n\nOur recruiting team will follow up shortly with a calendar invite.\n\n<br><br>\n\nBest regards,<br>\nRecruitment Team",
+        "options": {}
+      },
+      "id": "e659128a-56d8-4b78-b776-055a80c16315",
+      "name": "Send Interview Invitation",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1296,
+        352
+      ],
+      "webhookId": "0566959b-e8f4-4060-a97b-5224800ff5d0",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "n5WLRLL5Y3RTl4Fd",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "value": "primary",
+          "mode": "list"
+        },
+        "start": "={{$now.plus({days: 3}).set({hour: 10, minute: 0}).toISO()}}",
+        "end": "={{$now.plus({days: 3}).set({hour: 10, minute: 30}).toISO()}}",
+        "additionalFields": {
+          "attendees": "={{ [$('Create Candidate in Airtable').item.json.fields['Sender Email']] }}",
+          "description": "=AI Match Score: {{$('Create Candidate in Airtable').item.json.fields['Match Score']}}\nSummary: {{$('Create Candidate in Airtable').item.json.fields['AI Summary']}}",
+          "sendUpdates": "all",
+          "summary": "=Interview: {{$('Create Candidate in Airtable').item.json.fields['Candidate Name']}}"
+        }
+      },
+      "id": "a709844a-eef2-4047-8df1-7d362ef8c847",
+      "name": "Create Interview Calendar Event",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.2,
+      "position": [
+        1584,
+        192
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "aOUwwn9blXj7HFcT",
+          "name": "Google Calendar account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "appLwkSFYYaeAYPYx",
+          "mode": "list",
+          "cachedResultName": "Recruitment",
+          "cachedResultUrl": "https://airtable.com/appLwkSFYYaeAYPYx"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Candidates",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": [
+            "id"
+          ],
+          "value": {
+            "id": "={{$('Create Candidate in Airtable').item.json.id}}",
+            "Application Status": "Interview Scheduled",
+            "Interview Questions": "={{ ($('Parse Interview Questions').item.json.interview_questions || []).join('\\n') }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "e6c2601c-0495-450c-a4df-a0e7e2ed68c5",
+      "name": "Update Status: Interview Scheduled",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        1552,
+        432
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "ce35YfWalHdYvcny",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "kaleruhemanth19@gmail.com",
+        "subject": "=Manual Review Needed: {{$json.name}} ({{$json.match_score}}% match)",
+        "message": "=A candidate needs manual review.\n\nName: {{$json.name}}\nEmail: {{$json.email}}\nMatch Score: {{$json.match_score}}\nAI Summary: {{$json.ai_summary}}\nMatching Skills: {{$json.matching_skills.join(', ')}}\nMissing Skills: {{$json.missing_skills.join(', ')}}\n\nPlease review the full record in Airtable and decide next steps.",
+        "options": {}
+      },
+      "id": "2931f12b-0fb0-4759-a0dd-b442bc8d324c",
+      "name": "Notify Recruiter: Manual Review",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1456,
+        656
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "webhookId": "da7a1264-8655-4773-a43d-3a64c47878e9",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "n5WLRLL5Y3RTl4Fd",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "d70b3833-49c5-4d9d-907f-dda998884425",
+      "name": "Rejected - No Further Action",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1312,
+        800
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "38ba4289-44af-4053-88c8-a76497220a0d",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -832,
+        848
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Central error handler: log details, could be wired to Slack/email\nconst err = $input.first().json;\nconsole.error('Workflow failed:', JSON.stringify({\n  workflow: err.workflow?.name,\n  node: err.execution?.lastNodeExecuted,\n  message: err.execution?.error?.message,\n  timestamp: new Date().toISOString()\n}, null, 2));\nreturn [{ json: { alerted: true, ...err } }];"
+      },
+      "id": "e9fc6e23-35b6-4c84-a2ce-4ba58a575a89",
+      "name": "Log & Alert on Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -592,
+        848
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ !!$binary?.attachment_0 && ($binary.attachment_0.mimeType?.includes('pdf') || $binary.attachment_0.mimeType?.includes('word') || $binary.attachment_0.fileExtension === 'docx' || $binary.attachment_0.fileExtension === 'pdf') }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4ced9d3f-35af-4ec3-b7a1-f596ef4b0664",
+      "name": "Filter: PDF or DOCX Only",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        -432,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "attachment_0",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -256,
+        288
+      ],
+      "id": "e2ed378e-c0ba-4f2b-8ad6-876df12c12d1",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "4cc86ea5-0685-419f-8da7-1614898574cc",
+              "name": "resume_text",
+              "value": "={{$json.text}}",
+              "type": "string"
+            },
+            {
+              "id": "932d93da-5761-4bbd-bc36-3eb8a35f1586",
+              "name": "file_type",
+              "value": "pdf",
+              "type": "string"
+            },
+            {
+              "id": "66da850c-87a7-4aa6-a45f-1199f4c4d03e",
+              "name": "file_name",
+              "value": "=resume.pdf",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -128,
+        480
+      ],
+      "id": "7e8cd76a-67d3-4a03-80d6-ba30346b68a7",
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "numberInputs": 3,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        560,
+        80
+      ],
+      "id": "771fd79a-4755-4066-866e-1667977ec391",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "operation": "markAsRead",
+        "messageId": "={{$json.id}}"
+      },
+      "id": "63c504b7-bb99-4c11-8ed4-d160f469fd83",
+      "name": "Mark Email as Read",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -832,
+        720
+      ],
+      "webhookId": "84c849bc-3885-498d-a59a-024afb413c8a",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "n5WLRLL5Y3RTl4Fd",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "inputDataFieldName": "attachment_0",
+        "name": "={{ $json.file_name || ($binary.attachment_0.fileName || 'resume_' + Date.now()) }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "119NmqgU5YbGrKq-0u7ylFdaXV2nRbvn5",
+          "mode": "list",
+          "cachedResultName": "Resume Data",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/119NmqgU5YbGrKq-0u7ylFdaXV2nRbvn5"
+        },
+        "options": {}
+      },
+      "id": "de8f0f2a-0ee2-4dd8-9131-7fa191c13740",
+      "name": "Store Original Resume (Drive)",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -432,
+        768
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "5sZSrjqcBi0urhLx",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "rl1",
+              "name": "resume_file_url",
+              "type": "string",
+              "value": "={{ $json.webViewLink || '' }}"
+            },
+            {
+              "id": "rl2",
+              "name": "resume_drive_file_id",
+              "type": "string",
+              "value": "={{ $json.id || '' }}"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "8748568d-db0a-4127-8397-3998799ff195",
+      "name": "Capture Resume File Link",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -272,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'llama-3.1-8b-instant',\n  temperature: 0.6,\n  response_format: { type: 'json_object' },\n  messages: [\n    { role: 'system', content: `You are an expert technical interviewer. Based on the job description and the candidate's resume data, generate exactly 5 targeted interview questions that probe the candidate's actual experience, surface any gaps versus the job requirements, and assess role-specific technical depth. Return ONLY valid JSON matching exactly this schema, no markdown, no commentary:\\n{\\n  \\\"interview_questions\\\": [string]\\n}` },\n    { role: 'user', content: 'JOB TITLE: ' + ($json.fields?.['Job Title Applied For'] || '') + '\\n\\nMATCHING SKILLS: ' + ($json.fields?.['Matching Skills'] || '') + '\\nMISSING SKILLS: ' + ($json.fields?.['Missing Skills'] || '') + '\\nAI SUMMARY: ' + ($json.fields?.['AI Summary'] || '') + '\\nCANDIDATE EXPERIENCE (years): ' + ($json.fields?.['Experience'] || '') }\n  ]\n}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "faecbba6-6ebe-4df2-9403-8ff9083ef61c",
+      "name": "AI: Generate Interview Questions (Groq)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1136,
+        -32
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "Aoijtk1z5mJLjsgO",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nfunction safeJsonParse(str) {\n  try { return JSON.parse(str); }\n  catch (e) {\n    const match = String(str).match(/\\{[\\s\\S]*\\}/);\n    if (match) { try { return JSON.parse(match[0]); } catch { return null; } }\n    return null;\n  }\n}\n\nconst record = $('Create Candidate in Airtable').first().json;\n\nlet raw = $json.choices?.[0]?.message?.content || '{}';\nraw = String(raw).replace(/```json/g, '').replace(/```/g, '').trim();\n\nconst parsed = safeJsonParse(raw) || { interview_questions: [] };\nconst questions = Array.isArray(parsed.interview_questions) ? parsed.interview_questions : [];\n\nreturn [{\n  json: {\n    ...record,\n    interview_questions: questions.length ? questions : ['Interview question generation failed - please prepare questions manually.']\n  }\n}];\n"
+      },
+      "id": "ecb5378e-9cf1-4134-abb3-daa97f6de5a0",
+      "name": "Parse Interview Questions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1296,
+        128
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Watch Recruitment Inbox": {
+      "main": [
+        [
+          {
+            "node": "Capture Email Metadata",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Set Job Description",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Mark Email as Read",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capture Email Metadata": {
+      "main": [
+        [
+          {
+            "node": "Filter: PDF or DOCX Only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by File Type": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract Text (DOCX)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore Unsupported Attachment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Text (DOCX)": {
+      "main": [
+        [
+          {
+            "node": "Merge Extracted Text",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Extracted Text": {
+      "main": [
+        [
+          {
+            "node": "AI: Parse Resume (Groq)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: Parse Resume (Groq)": {
+      "main": [
+        [
+          {
+            "node": "Validate & Clean Parsed JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Clean Parsed JSON": {
+      "main": [
+        [
+          {
+            "node": "AI: Match vs Job Description (Groq)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: Match vs Job Description (Groq)": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Build Final Candidate Record": {
+      "main": [
+        [
+          {
+            "node": "Create Candidate in Airtable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Candidate in Airtable": {
+      "main": [
+        [
+          {
+            "node": "Route by Application Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Application Status": {
+      "main": [
+        [
+          {
+            "node": "AI: Generate Interview Questions (Groq)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify Recruiter: Manual Review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Rejected - No Further Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Interview Invitation": {
+      "main": [
+        [
+          {
+            "node": "Create Interview Calendar Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Interview Calendar Event": {
+      "main": [
+        [
+          {
+            "node": "Update Status: Interview Scheduled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Log & Alert on Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Job Description": {
+      "main": [
+        [
+          {
+            "node": "AI: Match vs Job Description (Groq)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter: PDF or DOCX Only": {
+      "main": [
+        [
+          {
+            "node": "Route by File Type",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Store Original Resume (Drive)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "Merge Extracted Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Build Final Candidate Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Original Resume (Drive)": {
+      "main": [
+        [
+          {
+            "node": "Capture Resume File Link",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capture Resume File Link": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "AI: Generate Interview Questions (Groq)": {
+      "main": [
+        [
+          {
+            "node": "Parse Interview Questions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Interview Questions": {
+      "main": [
+        [
+          {
+            "node": "Send Interview Invitation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "1c748e12-5f4b-4c2e-8bbd-49a1514e75a4",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "551c01719d2dc4be7fea0f847885694c961f90b39967a1a2589e5b7a7ea69023"
+  },
+  "nodeGroups": [],
+  "id": "nj34wIqf6w1ekSc2",
+  "tags": []
+}
